@@ -427,6 +427,8 @@ const Index = () => {
   
   // Main Tab System (Projects, Standalone Equipment, Tasks, Completion Certificates)
   const [mainTab, setMainTab] = useState<'projects' | 'equipment' | 'tasks' | 'certificates'>('projects');
+  // Store the previous tab before navigating to project view (for back navigation)
+  const [previousTab, setPreviousTab] = useState<'projects' | 'equipment' | 'tasks' | 'certificates' | null>(null);
 
   // Fetch standalone equipment when equipment tab is active
   // Cache first 24 equipments (first 3 pages) and preserve cache on refresh
@@ -850,6 +852,14 @@ const Index = () => {
 
   // Handle project selection and navigation
   const handleSelectProject = (projectId: string, initialTab: string = "equipment") => {
+    // Store the current tab before switching (for back navigation)
+    if (mainTab !== 'projects') {
+      setPreviousTab(mainTab);
+      setMainTab('projects');
+    } else {
+      // If already on projects tab, store 'projects' as previous tab
+      setPreviousTab('projects');
+    }
     setSelectedProject(projectId);
     setSelectedProjectTab(initialTab);
   };
@@ -857,6 +867,13 @@ const Index = () => {
   const handleBackToProjects = () => {
     setSelectedProject(null);
     setSelectedProjectTab("equipment");
+    // Restore the previous tab if it was stored, otherwise default to 'projects'
+    if (previousTab) {
+      setMainTab(previousTab);
+      setPreviousTab(null);
+    } else {
+      setMainTab('projects');
+    }
   };
 
   // Handle adding new project to database
@@ -2797,8 +2814,8 @@ Note: Please download the Recommendation Letter template using the link above, f
           />
         ) : null}
 
-        {/* Selected Project View - Only show in Projects tab */}
-        {mainTab === 'projects' && selectedProject ? (
+        {/* Selected Project View - Show in Projects tab or Certificates tab */}
+        {((mainTab === 'projects' || mainTab === 'certificates') && selectedProject) ? (
           <UnifiedProjectView
             projectId={selectedProject}
             projectName={selectedProjectData?.name || "Project"}

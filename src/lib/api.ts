@@ -625,19 +625,45 @@ export const fastAPI = {
         }
       }
 
-      // Map progress data to equipment
+      // Fetch user data for progress entries separately (more reliable than joins)
+      const userIds = [...new Set(allProgressEntries.map((entry: any) => entry.created_by).filter(Boolean))];
+      let usersMap: Record<string, any> = {};
+      
+      if (userIds.length > 0) {
+        try {
+          const usersResponse = await api.get(`/users?id=in.(${userIds.join(',')})&select=id,full_name,email`, { timeout: 10000 });
+          const users = Array.isArray(usersResponse.data) ? usersResponse.data : [];
+          usersMap = users.reduce((acc: any, user: any) => {
+            acc[user.id] = { full_name: user.full_name, email: user.email };
+            return acc;
+          }, {});
+        } catch (userError) {
+          console.warn('⚠️ Could not fetch user data for progress entries (non-fatal):', userError);
+        }
+      }
+
+      // Map progress data to equipment and attach user information
       const equipmentWithProgressData = (equipment as any[]).map((eq: any) => {
         // Filter progress images for this equipment
         const progressImages = allProgressImages.filter((img: any) => img.equipment_id === eq.id);
-        // Filter progress entries for this equipment
-        const progressEntries = allProgressEntries.filter((entry: any) => entry.equipment_id === eq.id);
+        // Filter progress entries for this equipment and attach user information
+        const progressEntries = allProgressEntries
+          .filter((entry: any) => entry.equipment_id === eq.id)
+          .map((entry: any) => ({
+            ...entry,
+            users: entry.created_by && usersMap[entry.created_by] ? { 
+              full_name: usersMap[entry.created_by].full_name, 
+              email: usersMap[entry.created_by].email 
+            } : null,
+            created_by_user: entry.created_by ? usersMap[entry.created_by] || null : null
+          }));
         
         return {
           ...eq,
           // Main progress images (top section)
           progress_images: progressImages.map((img: any) => img.image_url),
           progress_images_metadata: progressImages,
-          // Progress entries (updates tab) - separate from progress images
+          // Progress entries (updates tab) - separate from progress images, with user info
           progress_entries: progressEntries,
           // Technical sections and custom fields (already in eq from database)
           technical_sections: eq.technical_sections || [],
@@ -828,19 +854,45 @@ export const fastAPI = {
       const allProgressImages = standaloneProgressImages;
       const allProgressEntries = standaloneProgressEntries;
   
-      // Map progress data to equipment
+      // Fetch user data for progress entries separately (more reliable than joins)
+      const userIds = [...new Set(allProgressEntries.map((entry: any) => entry.created_by).filter(Boolean))];
+      let usersMap: Record<string, any> = {};
+      
+      if (userIds.length > 0) {
+        try {
+          const usersResponse = await api.get(`/users?id=in.(${userIds.join(',')})&select=id,full_name,email`, { timeout: 10000 });
+          const users = Array.isArray(usersResponse.data) ? usersResponse.data : [];
+          usersMap = users.reduce((acc: any, user: any) => {
+            acc[user.id] = { full_name: user.full_name, email: user.email };
+            return acc;
+          }, {});
+        } catch (userError) {
+          console.warn('⚠️ Could not fetch user data for standalone progress entries (non-fatal):', userError);
+        }
+      }
+  
+      // Map progress data to equipment and attach user information
       const equipmentWithProgressData = (equipment as any[]).map((eq: any) => {
         // Filter progress images for this equipment
         const progressImages = allProgressImages.filter((img: any) => img.equipment_id === eq.id);
-        // Filter progress entries for this equipment
-        const progressEntries = allProgressEntries.filter((entry: any) => entry.equipment_id === eq.id);
+        // Filter progress entries for this equipment and attach user information
+        const progressEntries = allProgressEntries
+          .filter((entry: any) => entry.equipment_id === eq.id)
+          .map((entry: any) => ({
+            ...entry,
+            users: entry.created_by && usersMap[entry.created_by] ? { 
+              full_name: usersMap[entry.created_by].full_name, 
+              email: usersMap[entry.created_by].email 
+            } : null,
+            created_by_user: entry.created_by ? usersMap[entry.created_by] || null : null
+          }));
         
         return {
           ...eq,
           // Main progress images (top section)
           progress_images: progressImages.map((img: any) => img.image_url),
           progress_images_metadata: progressImages,
-          // Progress entries (updates tab) - separate from progress images
+          // Progress entries (updates tab) - separate from progress images, with user info
           progress_entries: progressEntries,
           // Technical sections and custom fields (already in eq from database)
           technical_sections: eq.technical_sections || [],

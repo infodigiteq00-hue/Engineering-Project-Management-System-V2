@@ -2347,35 +2347,20 @@ const StandaloneEquipmentCard: React.FC<StandaloneEquipmentCardProps> = (props) 
                                           <User className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
                                           <span className="text-blue-600 font-medium truncate">
                                             {(() => {
-                                              // Get user name with priority: entry users > uploadedBy > user object > localStorage > email (last resort)
-                                              let userName = (entry as any).users?.full_name || (entry as any).uploadedBy;
+                                              // Get user name from the entry's creator - priority: users (joined) > created_by_user > uploadedBy
+                                              // DO NOT fall back to current user - always show the actual creator
+                                              let userName = (entry as any).users?.full_name || 
+                                                           (entry as any).created_by_user?.full_name || 
+                                                           (entry as any).uploadedBy;
                                               
-                                              if (!userName) {
-                                                // Try user object
-                                                userName = (user as any)?.full_name;
+                                              // If still no name, try to fetch it (but don't use current user as fallback)
+                                              if (!userName && (entry as any).created_by) {
+                                                // Could fetch user data here, but for now show "Unknown User"
+                                                userName = 'Unknown User';
                                               }
                                               
-                                              if (!userName) {
-                                                // Try localStorage userData
-                                                try {
-                                                  const userData = JSON.parse(localStorage.getItem('userData') || '{}');
-                                                  userName = userData?.full_name || userData?.name;
-                                                } catch (e) {
-                                                  // Ignore parse errors
-                                                }
-                                              }
-                                              
-                                              if (!userName) {
-                                                // Try old userName in localStorage
-                                                userName = localStorage.getItem('userName');
-                                              }
-                                              
-                                              // Email as last resort only
-                                              if (!userName) {
-                                                userName = user?.email || 'Unknown User';
-                                              }
-                                              
-                                              return userName;
+                                              // Last resort: show "Unknown User" instead of current user's name
+                                              return userName || 'Unknown User';
                                             })()}
                                           </span>
                                         </div>

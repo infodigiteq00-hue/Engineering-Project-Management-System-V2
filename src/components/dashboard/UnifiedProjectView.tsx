@@ -79,6 +79,133 @@ const UnifiedProjectView = ({
   const [teamMembers, setTeamMembers] = useState([]);
   const [teamMembersLoading, setTeamMembersLoading] = useState(false);
 
+  // Filter equipment based on user role and equipment assignments
+  const filteredEquipment = useMemo(() => {
+    if (!equipment || equipment.length === 0) {
+      return [];
+    }
+    
+    // Get current user info - check multiple sources for email
+    let currentUserEmail = '';
+    try {
+      // Try from auth context first
+      if (user?.email) {
+        currentUserEmail = user.email;
+      } else {
+        // Try from localStorage userData object
+        const userData = JSON.parse(localStorage.getItem('userData') || '{}');
+        currentUserEmail = userData.email || localStorage.getItem('userEmail') || '';
+      }
+    } catch (error) {
+      console.error('Error getting user email:', error);
+      currentUserEmail = localStorage.getItem('userEmail') || '';
+    }
+    
+    const currentUserRole = userRole || localStorage.getItem('userRole') || '';
+    
+    // Normalize email for comparison
+    const normalizedUserEmail = currentUserEmail.toLowerCase().trim();
+    
+    // Debug logging (can be removed after testing)
+    console.log('🔍 Equipment Filtering Debug:', {
+      currentUserEmail: normalizedUserEmail,
+      currentUserRole,
+      teamMembersCount: teamMembers.length,
+      teamMembersLoading,
+      equipmentCount: equipment?.length || 0,
+      teamMemberEmails: teamMembers.map((m: any) => m.email?.toLowerCase().trim())
+    });
+    
+    // Project managers and VDCR managers can see all equipment
+    if (currentUserRole === 'firm_admin' || currentUserRole === 'project_manager' || currentUserRole === 'vdcr_manager') {
+      console.log('✅ User is admin/manager - showing all equipment');
+      return equipment;
+    }
+    
+    // For editors and viewers, filter by equipment assignments
+    if (currentUserRole === 'editor' || currentUserRole === 'viewer') {
+      // If team members are still loading, wait (don't show equipment yet)
+      if (teamMembersLoading) {
+        console.log('⏳ Team members still loading - waiting...');
+        return [];
+      }
+      
+      // If team members haven't loaded yet, return empty array (will update when loaded)
+      if (teamMembers.length === 0) {
+        console.log('⏳ Team members not loaded yet - waiting...');
+        return [];
+      }
+      
+      // Find the current user's team member record for this project
+      const userTeamMember = teamMembers.find((member: any) => {
+        const memberEmail = (member.email || '').toLowerCase().trim();
+        return memberEmail === normalizedUserEmail;
+      });
+      
+      console.log('🔍 User team member search:', {
+        searchingFor: normalizedUserEmail,
+        found: !!userTeamMember,
+        memberEmail: userTeamMember?.email,
+        assignments: userTeamMember?.equipmentAssignments,
+        assignmentsLength: userTeamMember?.equipmentAssignments?.length
+      });
+      
+      if (!userTeamMember) {
+        console.log('⚠️ User not found in team members - showing no equipment');
+        return [];
+      }
+      
+      if (!userTeamMember.equipmentAssignments || userTeamMember.equipmentAssignments.length === 0) {
+        console.log('⚠️ No equipment assignments found for user - showing no equipment');
+        return [];
+      }
+      
+      const assignments = Array.isArray(userTeamMember.equipmentAssignments) 
+        ? userTeamMember.equipmentAssignments 
+        : [];
+      
+      // Check if user has "All Equipment" assignment
+      if (assignments.includes('All Equipment')) {
+        console.log('✅ User has "All Equipment" assignment - showing all equipment');
+        return equipment;
+      }
+      
+      // Filter equipment based on assignments
+      const filtered = equipment.filter((eq: any) => {
+        const eqId = eq.id;
+        const eqName = eq.name;
+        const eqTagNumber = eq.tagNumber || eq.tag_number;
+        
+        // Check if equipment ID is in assignments
+        if (eqId && assignments.includes(eqId)) {
+          return true;
+        }
+        
+        // Check if equipment name is in assignments
+        if (eqName && assignments.includes(eqName)) {
+          return true;
+        }
+        
+        // Check if equipment tag number is in assignments
+        if (eqTagNumber && assignments.includes(eqTagNumber)) {
+          return true;
+        }
+        
+        return false;
+      });
+      
+      console.log(`✅ Filtered equipment: ${filtered.length} of ${equipment.length} items`, {
+        assignments,
+        equipmentIds: equipment.map(eq => eq.id)
+      });
+      return filtered;
+    }
+    
+    // Default: return all equipment (for other roles or if role is not recognized)
+    console.log('⚠️ Unknown role or no filtering applied - showing all equipment');
+    return equipment;
+  }, [equipment, teamMembers, teamMembersLoading, user?.email, userRole]);
+
   // VDCR and Equipment Logs states
   const [vdcrRecords, setVdcrRecords] = useState<any[]>([]); // Activity logs for Activity Log tab
   const [vdcrDocuments, setVdcrDocuments] = useState<any[]>([]); // Actual VDCR records for Birdview
@@ -1162,7 +1289,8 @@ const UnifiedProjectView = ({
               </div>
               <div className="p-6">
                 <EquipmentGrid
-                  equipment={equipment}
+                  key={`equipment-${projectId}-${filteredEquipment.length}`}
+                  equipment={filteredEquipment}
                   projectName={projectName}
                   projectId={projectId}
                   onBack={onBack}

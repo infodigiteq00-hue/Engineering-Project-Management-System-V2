@@ -589,13 +589,9 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
     return transformEquipmentData(dbEquipment);
   }, []); // Memoized with empty dependencies (pure function)
 
-  // OPTIMIZATION: Initialize with equipment immediately to avoid skeleton loader delay
-  const [localEquipment, setLocalEquipment] = useState<Equipment[]>(() => {
-    if (equipment && equipment.length > 0) {
-      return transformEquipmentDataCallback(equipment);
-    }
-    return [];
-  });
+  // Initialize with empty array - will be updated by useEffect when filtered equipment arrives
+  // This ensures we don't show unfiltered equipment before filtering is applied
+  const [localEquipment, setLocalEquipment] = useState<Equipment[]>([]);
   const [imageMetadata, setImageMetadata] = useState<Record<string, Array<{ id: string, description: string, uploadedBy: string, uploadDate: string }>>>({});
   const [isLoadingProgressImages, setIsLoadingProgressImages] = useState(false);
   
@@ -780,9 +776,14 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
 
   // Update local equipment when equipment prop changes
   useEffect(() => {
-    if (equipment && equipment.length > 0) {
+    // Always update localEquipment when equipment prop changes, even if empty
+    // This ensures filtered equipment (including empty arrays) is properly reflected
+    console.log('🔄 EquipmentGrid useEffect: equipment prop changed, length:', equipment?.length || 0);
+    
+    // Handle both array and undefined/null cases
+    if (equipment && Array.isArray(equipment)) {
       // PERFORMANCE: Console logs commented out - uncomment if needed for debugging
-      // console.log('🔄 Equipment data received:', equipment);
+      // console.log('🔄 Equipment data received:', equipment.length, 'items');
       const transformedEquipment = transformEquipmentDataCallback(equipment);
       
       // Post-process: For standalone equipment, ensure status is 'active' (not 'pending')
@@ -796,11 +797,13 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
       }
       
       // console.log('🔄 Transformed equipment:', transformedEquipment);
+      console.log('🔄 EquipmentGrid: Updating localEquipment with', transformedEquipment.length, 'items');
+      console.log('🔄 EquipmentGrid: Equipment IDs:', transformedEquipment.map(eq => eq.id));
       setLocalEquipment(transformedEquipment);
 
       // OPTIMIZATION: Pre-fetch team members for all standalone equipment in background
       // This ensures team members are available immediately when viewing equipment cards
-      if (projectId === 'standalone' && transformedEquipment.length > 0) {
+      if (projectId === 'standalone' && transformedEquipment && transformedEquipment.length > 0) {
         devLog('🔄 Pre-fetching team members for all equipment in background...');
         // Use Promise.allSettled to fetch all in parallel without blocking
         Promise.allSettled(
@@ -889,6 +892,10 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
 
       // Load project members for team assignment
       loadProjectMembers();
+    } else {
+      // If equipment is empty or undefined, clear localEquipment
+      console.log('🔄 EquipmentGrid: Clearing localEquipment (empty or undefined)');
+      setLocalEquipment([]);
     }
   }, [equipment, projectId]);
 
@@ -1486,9 +1493,22 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
   // CRITICAL FIX: Refresh equipment data on mount to ensure progress images are loaded
   // The initial equipment prop might be stale and missing progress images
   // This must be AFTER refreshEquipmentData is defined
+  // NOTE: For editors/viewers with filtered equipment, we should NOT refresh from database
+  // as it would override the filtered equipment. Instead, we rely on the filtered equipment prop.
   useEffect(() => {
-    // Refresh equipment data immediately on mount to fetch latest progress images
-    refreshEquipmentData(true);
+    // Only refresh if we're not using filtered equipment (i.e., for admins/managers)
+    // For editors/viewers, the equipment prop is already filtered, so don't override it
+    const userRole = localStorage.getItem('userRole') || '';
+    const isFilteredUser = userRole === 'editor' || userRole === 'viewer';
+    
+    if (!isFilteredUser) {
+      // Refresh equipment data immediately on mount to fetch latest progress images
+      refreshEquipmentData(true);
+    } else {
+      // For filtered users, just ensure localEquipment is synced with the filtered equipment prop
+      // The equipment prop is already filtered, so we don't need to fetch from database
+      console.log('🔄 EquipmentGrid: Skipping refreshEquipmentData for filtered user, using filtered equipment prop');
+    }
   }, [projectId, refreshEquipmentData]);
   
   // Reset pagination to page 1 when filters change or when switching between project and standalone
@@ -9588,35 +9608,20 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
                                           <User className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
                                           <span className="text-blue-600 font-medium truncate">
                                             {(() => {
-                                              // Get user name with priority: entry users > uploadedBy > user object > localStorage > email (last resort)
-                                              let userName = (entry as any).users?.full_name || (entry as any).uploadedBy;
+                                              // Get user name from the entry's creator - priority: users (joined) > created_by_user > uploadedBy
+                                              // DO NOT fall back to current user - always show the actual creator
+                                              let userName = (entry as any).users?.full_name || 
+                                                           (entry as any).created_by_user?.full_name || 
+                                                           (entry as any).uploadedBy;
                                               
-                                              if (!userName) {
-                                                // Try user object
-                                                userName = (user as any)?.full_name;
+                                              // If still no name, try to fetch it (but don't use current user as fallback)
+                                              if (!userName && (entry as any).created_by) {
+                                                // Could fetch user data here, but for now show "Unknown User"
+                                                userName = 'Unknown User';
                                               }
                                               
-                                              if (!userName) {
-                                                // Try localStorage userData
-                                                try {
-                                                  const userData = JSON.parse(localStorage.getItem('userData') || '{}');
-                                                  userName = userData?.full_name || userData?.name;
-                                                } catch (e) {
-                                                  // Ignore parse errors
-                                                }
-                                              }
-                                              
-                                              if (!userName) {
-                                                // Try old userName in localStorage
-                                                userName = localStorage.getItem('userName');
-                                              }
-                                              
-                                              // Email as last resort only
-                                              if (!userName) {
-                                                userName = user?.email || 'Unknown User';
-                                              }
-                                              
-                                              return userName;
+                                              // Last resort: show "Unknown User" instead of current user's name
+                                              return userName || 'Unknown User';
                                             })()}
                                           </span>
                                         </div>

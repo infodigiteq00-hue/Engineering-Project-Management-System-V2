@@ -47,14 +47,28 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
   const [firmId, setFirmId] = useState<string>('');
   const [firmProjectIds, setFirmProjectIds] = useState<string[]>([]);
   const [projectIdsLoaded, setProjectIdsLoaded] = useState(false);
+  // Store completed project IDs to filter them out from Company Highlights
+  const [completedProjectIds, setCompletedProjectIds] = useState<string[]>([]);
 
   // Fetch all project IDs for the current firm (used for firm_admin scoping and to validate memberships)
   const fetchFirmProjects = async (firmId: string) => {
     try {
       const api = (await import('@/lib/api')).default;
-      const response = await api.get(`/projects?firm_id=eq.${firmId}&select=id`);
-      const projectIds = (response.data as any[]).map((project: any) => project.id).filter(Boolean);
+      // Fetch projects with status to identify completed ones
+      const response = await api.get(`/projects?firm_id=eq.${firmId}&select=id,status`);
+      const projects = response.data as any[];
+      const projectIds = projects.map((project: any) => project.id).filter(Boolean);
       setFirmProjectIds([...new Set(projectIds)]);
+      
+      // Extract completed project IDs
+      const completedIds = projects
+        .filter((p: any) => p.status === 'completed' || p.status?.toLowerCase() === 'completed')
+        .map((p: any) => p.id)
+        .filter(Boolean);
+      setCompletedProjectIds(prev => {
+        const combined = [...new Set([...prev, ...completedIds])];
+        return combined;
+      });
     } catch (error) {
       console.error('Error fetching firm projects for CompanyHighlights:', error);
       setFirmProjectIds([]);
@@ -99,8 +113,28 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
       
       // Query project_members by email (table uses email, not user_id)
       // Use ilike for case-insensitive matching to handle any case differences
-      const response = await api.get(`/project_members?email=ilike.${encodeURIComponent(normalizedEmail)}&select=project_id`);
-      const projectIds = (response.data as any[]).map((member: any) => member.project_id).filter(Boolean);
+      // Also fetch project status to identify completed projects
+      const response = await api.get(`/project_members?email=ilike.${encodeURIComponent(normalizedEmail)}&select=project_id,projects:project_id(id,status)`);
+      const members = response.data as any[];
+      const projectIds = members.map((member: any) => member.project_id).filter(Boolean);
+      
+      // Extract completed project IDs from the joined projects data
+      const completedIds = members
+        .map((m: any) => {
+          const project = m.projects;
+          if (project && (project.status === 'completed' || project.status?.toLowerCase() === 'completed')) {
+            return project.id || m.project_id;
+          }
+          return null;
+        })
+        .filter(Boolean);
+      
+      if (completedIds.length > 0) {
+        setCompletedProjectIds(prev => {
+          const combined = [...new Set([...prev, ...completedIds])];
+          return combined;
+        });
+      }
       
       if (projectIds.length > 0) {
         console.log(`✅ Found ${projectIds.length} assigned projects for ${normalizedEmail}:`, projectIds);
@@ -228,7 +262,11 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
           return (a.type || '').localeCompare(b.type || '');
         });
         
-        const filteredMilestones = filterByAssignedProjects(sortedMilestones, 'project_id');
+        // Filter out completed projects from milestones
+        const filteredMilestones = filterByAssignedProjects(sortedMilestones, 'project_id').filter((eq: any) => {
+          const projectId = eq.project_id || eq.projects?.id;
+          return projectId && !completedProjectIds.includes(projectId);
+        });
         setMilestoneUpdates(filteredMilestones);
       } catch (error) {
         console.error('❌ Error fetching milestone updates:', error);
@@ -270,6 +308,11 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
       } else {
         // Direct path
         itemProjectId = item[projectIdKey] || item.equipment?.[projectIdKey] || item.vdcr_records?.[projectIdKey];
+      }
+      
+      // Exclude items from completed projects
+      if (itemProjectId && completedProjectIds.includes(itemProjectId)) {
+        return false;
       }
       
       // If project ID is found, check if it's in the allowed list for this user/firm
@@ -435,7 +478,7 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
       isMounted = false;
       abortController.abort();
     };
-  }, [dateRangeStart, dateRangeEnd, isExpanded, activeTab, productionSubTab, userRole, assignedProjectIds, firmProjectIds, timePeriod, projectIdsLoaded]);
+  }, [dateRangeStart, dateRangeEnd, isExpanded, activeTab, productionSubTab, userRole, assignedProjectIds, firmProjectIds, timePeriod, projectIdsLoaded, completedProjectIds]);
 
   // Fetch equipment card updates (equipment_updated activity logs)
   // NOTE: This runs separately for "All Updates" tab but doesn't affect the main loading state
@@ -533,7 +576,7 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
     if (isExpanded && activeTab === 'production' && canSeeTab('production') && productionSubTab === 'all-updates') {
       fetchEquipmentCardUpdates();
     }
-  }, [dateRangeStart, dateRangeEnd, isExpanded, activeTab, productionSubTab, userRole, assignedProjectIds, projectIdsLoaded]);
+  }, [dateRangeStart, dateRangeEnd, isExpanded, activeTab, productionSubTab, userRole, assignedProjectIds, projectIdsLoaded, completedProjectIds]);
 
   // Audio playback function
   const playAudio = (audioData: string, entryId: string) => {
@@ -766,7 +809,7 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
     if (isExpanded && activeTab === 'documentation' && canSeeTab('documentation')) {
       fetchDocumentationUpdates();
     }
-  }, [dateRangeStart, dateRangeEnd, activeTab, isExpanded, userRole, assignedProjectIds, firmProjectIds, timePeriod, projectIdsLoaded]);
+  }, [dateRangeStart, dateRangeEnd, activeTab, isExpanded, userRole, assignedProjectIds, firmProjectIds, timePeriod, projectIdsLoaded, completedProjectIds]);
 
   // Fetch timeline updates - ALL equipment ordered by days remaining (not filtered by time period)
   // Uses po_cdd (PO-CDD) field instead of completion_date
@@ -882,7 +925,7 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
     if (isExpanded && activeTab === 'timeline' && canSeeTab('timeline')) {
       fetchTimelineUpdates();
     }
-  }, [activeTab, isExpanded, userRole, assignedProjectIds, firmProjectIds, projectIdsLoaded]);
+  }, [activeTab, isExpanded, userRole, assignedProjectIds, firmProjectIds, projectIdsLoaded, completedProjectIds]);
 
   // Clear search queries when switching tabs
   useEffect(() => {
@@ -1085,7 +1128,7 @@ const CompanyHighlights = ({ onSelectProject }: CompanyHighlightsProps) => {
 
     const interval = setInterval(refreshData, 30000); // Refresh every 30 seconds
     return () => clearInterval(interval);
-  }, [isExpanded, activeTab, productionSubTab, dateRangeStart, dateRangeEnd, userRole, assignedProjectIds, firmProjectIds, projectIdsLoaded]);
+  }, [isExpanded, activeTab, productionSubTab, dateRangeStart, dateRangeEnd, userRole, assignedProjectIds, firmProjectIds, projectIdsLoaded, completedProjectIds]);
 
   const formatTimeAgo = (dateString: string) => {
     try {

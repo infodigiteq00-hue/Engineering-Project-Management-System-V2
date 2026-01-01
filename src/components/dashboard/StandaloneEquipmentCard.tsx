@@ -2620,7 +2620,7 @@ const StandaloneEquipmentCard: React.FC<StandaloneEquipmentCardProps> = (props) 
                                           </span>
                                         </div>
                                         <div className="text-[10px] sm:text-xs text-gray-500 truncate">
-                                          By: {doc.uploadedBy} â€¢ {new Date(doc.uploadDate).toLocaleDateString()}
+                                          By: {doc.uploaded_by_user?.full_name || doc.uploadedBy || 'Unknown'} • {new Date(doc.uploadDate).toLocaleDateString()}
                                         </div>
                                       </div>
                                       <div className="flex gap-2 sm:gap-1 justify-end sm:justify-start flex-shrink-0">

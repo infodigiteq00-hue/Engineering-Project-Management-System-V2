@@ -1,8 +1,8 @@
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ChevronLeft, FileText, Download, Edit, Plus, Eye, Check, X, ChevronDown, ChevronRight, Users, Settings } from "lucide-react";
-import { useState, useEffect } from "react";
+import { ChevronLeft, FileText, Download, Edit, Plus, Eye, Check, X, ChevronDown, ChevronRight, Users, Settings, Lock, Unlock, History, Send, Calendar, Clock } from "lucide-react";
+import { useState, useEffect, useMemo } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,6 +14,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { useToast } from "@/hooks/use-toast";
 import { logVDCRCreated, logVDCRUpdated, logVDCRStatusChanged, logVDCRDocumentUploaded, logVDCRDeleted, logVDCRFieldUpdated } from "@/lib/activityLogger";
+import VDCRSearchBar from "./VDCRSearchBar";
+import VDCRRevisionHistory from "./VDCRRevisionHistory";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
@@ -58,6 +60,7 @@ interface VDCRRecord {
   updatedBy?: string;
   documentFile?: DocumentFile;
   documentUrl?: string;
+  revisionEvents?: any[];
 }
 
 interface Equipment {
@@ -135,6 +138,15 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
     remarks: ''
   });
 
+   // Lock/unlock state for fields
+   const [fieldLocks, setFieldLocks] = useState({
+    srNo: true,           // Locked by default
+    revision: true,       // Locked by default
+    documentName: true,   // Locked by default
+    clientDocNo: true,    // Locked by default
+    internalDocNo: true   // Locked by default
+  });
+
   // Get current user info for tracking who made updates
   const currentUser = userName || user?.email || 'Unknown User';
 
@@ -198,6 +210,30 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
   const [pdfDocument, setPdfDocument] = useState<any>(null);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
 
+  // Revision history state
+  const [revisionHistoryModal, setRevisionHistoryModal] = useState<{
+    isOpen: boolean;
+    vdcrRecordId: string | null;
+    documentName: string;
+  }>({
+    isOpen: false,
+    vdcrRecordId: null,
+    documentName: ''
+  });
+
+  // Revision event tracking state
+  const [revisionEventModal, setRevisionEventModal] = useState<{
+    isOpen: boolean;
+    eventType: 'submitted' | 'received' | null;
+    estimatedReturnDate: string;
+    notes: string;
+  }>({
+    isOpen: false,
+    eventType: null,
+    estimatedReturnDate: '',
+    notes: ''
+  });
+
   // Bulk upload modal state
   const [bulkUploadModal, setBulkUploadModal] = useState<{
     isOpen: boolean;
@@ -217,6 +253,9 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
 
   // Equipment data state - will be loaded from Supabase
   const [equipmentData, setEquipmentData] = useState<Equipment[]>([]);
+
+  // Search functionality state
+  const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Load data on component mount
   useEffect(() => {
@@ -269,6 +308,24 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
 
       // Transform Supabase data to match UI interface
       const transformedData: VDCRRecord[] = await Promise.all((data as any[]).map(async (record: any) => {
+        
+         // Load revision events for this record
+         let revisionEvents: any[] = [];
+         try {
+           const events: any = await fastAPI.getVDCRRevisionEvents(record.id);
+           if (Array.isArray(events)) {
+             revisionEvents = events;
+           } else if (events && typeof events === 'object') {
+             revisionEvents = [];
+           }
+         } catch (error: any) {
+           // Silently handle 404 (table doesn't exist yet) - no need to log
+           if (error?.response?.status !== 404) {
+             console.log('Error loading revision events:', error);
+           }
+           revisionEvents = [];
+         }
+
         let documentFile = undefined;
 
         // Use document_url directly from vdcr_records table
@@ -344,7 +401,8 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
           remarks: record.remarks,
           updatedBy: record.updated_by_user?.full_name || record.updated_by || 'Unknown User',
           documentUrl: documentFile?.filePath || (record.document_name ? `/documents/vdcr/${record.id}` : undefined),
-          documentFile: documentFile
+          documentFile: documentFile,
+          revisionEvents: revisionEvents
         };
       }));
 
@@ -378,6 +436,142 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
       setEquipmentData([]);
     }
   };
+
+  // Helper function to calculate days between dates
+  const calculateDaysBetween = (startDate: string, endDate: string): number => {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const diffTime = Math.abs(end.getTime() - start.getTime());
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  };
+
+  // Helper function to get counter metrics for a record
+  const getCounterMetrics = (record: VDCRRecord) => {
+    if (!record.revisionEvents || record.revisionEvents.length === 0) {
+      return {
+        daysSinceLastSubmission: null,
+        daysWithClient: null,
+        currentStatus: 'No events',
+        lastEventDate: null,
+        daysSinceLastEvent: null,
+        lastEventType: null,
+        lastEventRevision: null
+      };
+    }
+
+    const sortedEvents = [...record.revisionEvents].sort((a, b) => 
+      new Date(a.event_date).getTime() - new Date(b.event_date).getTime()
+    );
+
+    const lastEvent = sortedEvents[sortedEvents.length - 1];
+    const lastSubmission = sortedEvents.filter(e => e.event_type === 'submitted').pop();
+    const lastReceipt = sortedEvents.filter(e => e.event_type === 'received').pop();
+
+    let daysSinceLastSubmission = null;
+    let daysWithClient = null;
+    let currentStatus = 'No events';
+
+    // Last event information
+    const lastEventDate = lastEvent ? new Date(lastEvent.event_date) : null;
+    const daysSinceLastEvent = lastEventDate ? calculateDaysBetween(
+      lastEvent.event_date,
+      new Date().toISOString()
+    ) : null;
+    const lastEventType = lastEvent ? lastEvent.event_type : null;
+    const lastEventRevision = lastEvent ? lastEvent.revision_number : null;
+
+    if (lastSubmission) {
+      daysSinceLastSubmission = calculateDaysBetween(
+        lastSubmission.event_date,
+        new Date().toISOString()
+      );
+    }
+
+    if (lastSubmission && !lastReceipt) {
+      // Submitted but not received back
+      daysWithClient = calculateDaysBetween(
+        lastSubmission.event_date,
+        new Date().toISOString()
+      );
+      currentStatus = 'With Client';
+    } else if (lastSubmission && lastReceipt) {
+      // Check if there's a submission after the last receipt
+      const submissionsAfterLastReceipt = sortedEvents.filter(e => 
+        e.event_type === 'submitted' && 
+        new Date(e.event_date) > new Date(lastReceipt.event_date)
+      );
+      
+      if (submissionsAfterLastReceipt.length > 0) {
+        const latestSubmission = submissionsAfterLastReceipt[submissionsAfterLastReceipt.length - 1];
+        daysWithClient = calculateDaysBetween(
+          latestSubmission.event_date,
+          new Date().toISOString()
+        );
+        currentStatus = 'With Client';
+      } else {
+        currentStatus = 'Received';
+      }
+    }
+
+    return {
+      daysSinceLastSubmission,
+      daysWithClient,
+      currentStatus,
+      lastEventDate,
+      daysSinceLastEvent,
+      lastEventType,
+      lastEventRevision
+    };
+  };
+
+  // Filter VDCR data based on search query
+  const filteredVDCRData = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return vdcrData;
+    }
+
+    const query = searchQuery.toLowerCase().trim();
+    
+    return vdcrData.filter((record) => {
+      // Search in document name
+      if (record.documentName?.toLowerCase().includes(query)) return true;
+      
+      // Search in equipment tag numbers
+      if (record.equipmentTagNo.some(tag => tag.toLowerCase().includes(query))) return true;
+      
+      // Search in revision
+      if (record.revision?.toLowerCase().includes(query)) return true;
+      
+      // Search in status
+      if (record.status?.toLowerCase().includes(query)) return true;
+      
+      // Search in client doc number
+      if (record.clientDocNo?.toLowerCase().includes(query)) return true;
+      
+      // Search in internal doc number
+      if (record.internalDocNo?.toLowerCase().includes(query)) return true;
+      
+      // Search in serial numbers
+      if (record.mfgSerialNo.some(serial => serial.toLowerCase().includes(query))) return true;
+      
+      // Search in job numbers
+      if (record.jobNo.some(job => job.toLowerCase().includes(query))) return true;
+      
+      // Search in code status
+      if (record.codeStatus?.toLowerCase().includes(query)) return true;
+      
+      // Search in remarks
+      if (record.remarks?.toLowerCase().includes(query)) return true;
+      
+      // Search in updated by
+      if (record.updatedBy?.toLowerCase().includes(query)) return true;
+      
+      // Search in serial number
+      if (record.srNo?.toLowerCase().includes(query)) return true;
+      
+      return false;
+    });
+  }, [vdcrData, searchQuery]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -445,6 +639,15 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
       remarks: record.remarks || ''
     });
 
+    // Reset locks to default (all locked)
+    setFieldLocks({
+      srNo: true,
+      revision: true,
+      documentName: true,
+      clientDocNo: true,
+      internalDocNo: true
+    });
+
     // Set uploaded files if document exists
     if (record.documentFile) {
       setUploadedFiles([record.documentFile]);
@@ -453,6 +656,14 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
     }
 
     setIsEditModalOpen(true);
+  };
+
+   // Helper function to toggle field lock
+   const toggleFieldLock = (fieldName: 'srNo' | 'revision' | 'documentName' | 'clientDocNo' | 'internalDocNo') => {
+    setFieldLocks(prev => ({
+      ...prev,
+      [fieldName]: !prev[fieldName]
+    }));
   };
 
   const handleAddNewVDCR = () => {
@@ -479,8 +690,81 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
       status: 'pending',
       remarks: ''
     });
+ 
+    // Reset locks to default (all locked)
+    setFieldLocks({
+      srNo: true,
+      revision: true,
+      documentName: true,
+      clientDocNo: true,
+      internalDocNo: true
+    });
+
     setIsEditModalOpen(true);
   };
+
+// Handle revision event creation
+const handleCreateRevisionEvent = async () => {
+  if (!revisionEventModal.eventType || !editingVDCR) 
+  {
+    toast({ title: 'Error', description: 'Invalid event data', variant: 'destructive' });
+    return;
+  }
+
+  try {
+    // Convert date to ISO string if provided (date only, set to start of day)
+    let estimatedReturnDateISO = null;
+    if (revisionEventModal.estimatedReturnDate) {
+      const date = new Date(revisionEventModal.estimatedReturnDate);
+      date.setHours(0, 0, 0, 0); // Set to start of day
+      estimatedReturnDateISO = date.toISOString();
+    }
+
+    const eventData = {
+      vdcr_record_id: editingVDCR.id,
+      event_type: revisionEventModal.eventType,
+      revision_number: formData.revision,
+      event_date: new Date().toISOString(),
+      estimated_return_date: estimatedReturnDateISO,
+      notes: revisionEventModal.notes || null,
+      created_by: user?.id
+    };
+
+    await fastAPI.createVDCRRevisionEvent(eventData);
+    
+    toast({ 
+      title: 'Success', 
+      description: `Document ${revisionEventModal.eventType === 'submitted' ? 'submitted to client' : 'received back'} successfully.` 
+    });
+
+    // Reload VDCR data to refresh revision events
+    await loadVDCRData();
+
+    // Close modal
+    setRevisionEventModal({
+      isOpen: false,
+      eventType: null,
+      estimatedReturnDate: '',
+      notes: ''
+    });
+  } catch (error: any) {
+    // Check if it's a 404 (table doesn't exist) or other error
+    if (error?.response?.status === 404) {
+      toast({ 
+        title: 'Database Setup Required', 
+        description: 'Revision events table not found. Please run the migration SQL file first: supabase_migration_vdcr_revision_events.sql', 
+        variant: 'destructive' 
+      });
+    } else {
+      console.error('Error creating revision event:', error);
+      toast({ 
+        title: 'Error', 
+        description: error?.response?.data?.message || error?.message || 'Failed to create revision event', 
+        variant: 'destructive' 
+      });
+    }
+  }
+};
 
   const handleSaveChanges = async () => {
     // Validate required fields
@@ -491,6 +775,32 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
 
     try {
       setIsSaving(true);
+      
+        // Auto-increment revision if locked and this is an update (not new record)
+        let finalRevision = formData.revision;
+        if (!isAddingNew && fieldLocks.revision && editingVDCR) {
+          // Check if document changed (new file uploaded)
+          const hasNewDocument = uploadedFiles.length > 0 && 
+            (!editingVDCR.documentFile || 
+             uploadedFiles[uploadedFiles.length - 1].filePath !== editingVDCR.documentFile.filePath);
+          
+          // Check if any other fields changed
+          const hasChanges = 
+            formData.clientDocNo !== editingVDCR.clientDocNo ||
+            formData.internalDocNo !== editingVDCR.internalDocNo ||
+            formData.codeStatus !== editingVDCR.codeStatus ||
+            formData.status !== editingVDCR.status ||
+            formData.remarks !== (editingVDCR.remarks || '') ||
+            JSON.stringify(selectedEquipments) !== JSON.stringify(editingVDCR.equipmentTagNo) ||
+            hasNewDocument;
+  
+          if (hasChanges) {
+            const currentRevision = editingVDCR.revision || '0';
+            const revisionNum = parseInt(currentRevision.replace(/[^0-9]/g, '')) || 0;
+            finalRevision = (revisionNum + 1).toString();
+            setFormData(prev => ({ ...prev, revision: finalRevision }));
+          }
+        }
 
       // Get selected equipment details
       const selectedEquipmentDetails = getSelectedEquipmentDetails();
@@ -523,7 +833,7 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
       }
 
       // Prepare data for Supabase
-      const vdcrData = {
+      const vdcrData: any = {
         project_id: projectId,
         sr_no: formData.srNo,
         equipment_tag_numbers: selectedEquipments,
@@ -532,7 +842,7 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
         client_doc_no: formData.clientDocNo,
         internal_doc_no: formData.internalDocNo,
         document_name: formData.documentName,
-        revision: formData.revision,
+        revision: finalRevision,
         code_status: formData.codeStatus,
         status: formData.status,
         remarks: formData.remarks,
@@ -692,7 +1002,7 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
           };
         }
 
-        const updateData = {
+        const updateData: any = {
           sr_no: formData.srNo,
           equipment_tag_numbers: selectedEquipments,
           mfg_serial_numbers: newMfgSerialNos,
@@ -700,7 +1010,7 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
           client_doc_no: formData.clientDocNo,
           internal_doc_no: formData.internalDocNo,
           document_name: formData.documentName,
-          revision: formData.revision,
+          revision: finalRevision,
           code_status: formData.codeStatus,
           status: formData.status,
           remarks: formData.remarks,
@@ -827,6 +1137,15 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
         codeStatus: '',
         status: '',
         remarks: ''
+      });
+
+       // Reset locks
+      setFieldLocks({
+        srNo: true,
+        revision: true,
+        documentName: true,
+        clientDocNo: true,
+        internalDocNo: true
       });
 
     } catch (error) {
@@ -1078,23 +1397,13 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
       };
 
       setUploadedFiles(prev => [...prev, newDocument]);
-      setFormData(prev => ({ ...prev, documentName: uploadedFile.name }));
-
-      // Log document upload separately if VDCR record exists (editing mode)
-      // This is a separate action from save, so log it separately
-      if (editingVDCR?.id) {
-        try {
-          console.log('📝 Logging document upload (separate action):', { 
-            projectId, 
-            vdcrId: editingVDCR.id, 
-            documentName: formData.documentName || uploadedFile.name, 
-            fileName: uploadedFile.name 
-          });
-          await logVDCRDocumentUploaded(projectId, editingVDCR.id, formData.documentName || uploadedFile.name, uploadedFile.name);
-          console.log('✅ Document upload logged successfully (separate action)');
-        } catch (logError) {
-          console.error('⚠️ Error logging document upload (non-fatal):', logError);
-        }
+      
+      // Auto-increment revision if locked (when document changes)
+      if (fieldLocks.revision) {
+        const currentRevision = formData.revision || '0';
+        const revisionNum = parseInt(currentRevision.replace(/[^0-9]/g, '')) || 0;
+        const nextRevision = (revisionNum + 1).toString();
+        setFormData(prev => ({ ...prev, revision: nextRevision }));
       }
 
       // console.log('✅ File uploaded to storage successfully');
@@ -2107,53 +2416,155 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                   <div className="space-y-4">
                     <div className="grid grid-cols-2 gap-4">
                       <div>
+                      <div className="flex items-center justify-between mb-1">
                         <Label htmlFor="srNo">Serial Number</Label>
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => toggleFieldLock('srNo')}
+                            className="h-6 px-2 text-xs"
+                            title={fieldLocks.srNo ? 'Click to unlock and edit' : 'Click to lock'}
+                          >
+                            {fieldLocks.srNo ? (
+                              <Lock className="w-3 h-3 text-gray-500" />
+                            ) : (
+                              <Unlock className="w-3 h-3 text-blue-600" />
+                            )}
+                          </Button>
+                          </div>
                         <Input
                           id="srNo"
                           value={formData.srNo}
                           onChange={(e) => setFormData(prev => ({ ...prev, srNo: e.target.value }))}
+                          disabled={fieldLocks.srNo}
                           className="mt-1"
+                          placeholder="Auto-generated"
                         />
                       </div>
                       <div>
-                        <Label htmlFor="revision">Revision</Label>
+                      <div className="flex items-center justify-between mb-1">
+                          <Label htmlFor="revision">Revision</Label>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => toggleFieldLock('revision')}
+                            className="h-6 px-2 text-xs"
+                            title={fieldLocks.revision ? 'Click to unlock and edit (auto-increments when locked)' : 'Click to lock (will auto-increment on changes)'}
+                          >
+                            {fieldLocks.revision ? (
+                              <Lock className="w-3 h-3 text-gray-500" />
+                            ) : (
+                              <Unlock className="w-3 h-3 text-blue-600" />
+                            )}
+                          </Button>
+                        </div>
                         <Input
                           id="revision"
                           value={formData.revision}
                           onChange={(e) => setFormData(prev => ({ ...prev, revision: e.target.value }))}
+                          disabled={fieldLocks.revision}
                           className="mt-1"
+                          placeholder="Auto-increments when locked"
                         />
+                        {fieldLocks.revision && (
+                          <p className="text-xs text-gray-500 mt-1">Auto-increments by +1 when document changes</p>
+                        )}
                       </div>
                     </div>
 
                     <div>
-                      <Label htmlFor="documentName">Document Name</Label>
+                      <div className="flex items-center justify-between mb-1">
+                        <Label htmlFor="documentName">Document Name</Label>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => toggleFieldLock('documentName')}
+                          className="h-6 px-2 text-xs"
+                          title={fieldLocks.documentName ? 'Click to unlock and edit' : 'Click to lock'}
+                        >
+                          {fieldLocks.documentName ? (
+                            <Lock className="w-3 h-3 text-gray-500" />
+                          ) : (
+                            <Unlock className="w-3 h-3 text-blue-600" />
+                          )}
+                        </Button>
+                      </div>
                       <Input
                         id="documentName"
                         value={formData.documentName}
                         onChange={(e) => setFormData(prev => ({ ...prev, documentName: e.target.value }))}
+                        disabled={fieldLocks.documentName}
                         className="mt-1"
+                        placeholder="Enter document name (not auto-filled from file)"
                       />
+                      {fieldLocks.documentName && (
+                        <p className="text-xs text-gray-500 mt-1">Locked - click unlock to edit</p>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <Label htmlFor="clientDocNo">Client Document No.</Label>
+                        <div className="flex items-center justify-between mb-1">
+                          <Label htmlFor="clientDocNo">Client Document No.</Label>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => toggleFieldLock('clientDocNo')}
+                            className="h-6 px-2 text-xs"
+                            title={fieldLocks.clientDocNo ? 'Click to unlock and edit' : 'Click to lock'}
+                          >
+                            {fieldLocks.clientDocNo ? (
+                              <Lock className="w-3 h-3 text-gray-500" />
+                            ) : (
+                              <Unlock className="w-3 h-3 text-blue-600" />
+                            )}
+                          </Button>
+                        </div>
                         <Input
                           id="clientDocNo"
                           value={formData.clientDocNo}
                           onChange={(e) => setFormData(prev => ({ ...prev, clientDocNo: e.target.value }))}
+                          disabled={fieldLocks.clientDocNo}
                           className="mt-1"
+                          placeholder="Enter client document number"
                         />
+                        {fieldLocks.clientDocNo && (
+                          <p className="text-xs text-gray-500 mt-1">Locked - click unlock to edit</p>
+                        )}
                       </div>
                       <div>
-                        <Label htmlFor="internalDocNo">Internal Document No.</Label>
+                        <div className="flex items-center justify-between mb-1">
+                          <Label htmlFor="internalDocNo">Internal Document No.</Label>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => toggleFieldLock('internalDocNo')}
+                            className="h-6 px-2 text-xs"
+                            title={fieldLocks.internalDocNo ? 'Click to unlock and edit' : 'Click to lock'}
+                          >
+                            {fieldLocks.internalDocNo ? (
+                              <Lock className="w-3 h-3 text-gray-500" />
+                            ) : (
+                              <Unlock className="w-3 h-3 text-blue-600" />
+                            )}
+                          </Button>
+                        </div>
                         <Input
                           id="internalDocNo"
                           value={formData.internalDocNo}
                           onChange={(e) => setFormData(prev => ({ ...prev, internalDocNo: e.target.value }))}
+                          disabled={fieldLocks.internalDocNo}
                           className="mt-1"
+                          placeholder="Enter internal document number"
                         />
+                        {fieldLocks.internalDocNo && (
+                          <p className="text-xs text-gray-500 mt-1">Locked - click unlock to edit</p>
+                        )}
                       </div>
                     </div>
 
@@ -2168,10 +2579,10 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                             <SelectValue placeholder="Select Code Status" />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="Code 1">Code 1: Critical</SelectItem>
-                            <SelectItem value="Code 2">Code 2: Important</SelectItem>
-                            <SelectItem value="Code 3">Code 3: Standard</SelectItem>
-                            <SelectItem value="Code 4">Code 4: Reference</SelectItem>
+                            <SelectItem value="Code 1">Code 1</SelectItem>
+                            <SelectItem value="Code 2">Code 2</SelectItem>
+                            <SelectItem value="Code 3">Code 3</SelectItem>
+                            <SelectItem value="Code 4">Code 4</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -2206,6 +2617,49 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                         rows={3}
                       />
                     </div>
+
+                    
+                    {/* Revision Event Tracking */}
+                    <div className="mt-6 p-4 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg border-2 border-blue-200">
+                      <h4 className="font-semibold text-blue-800 mb-4 flex items-center gap-2">
+                        <History className="w-5 h-5" />
+                        Track Revision Events
+                      </h4>
+                      <div className="grid grid-cols-2 gap-4">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="bg-blue-50 hover:bg-blue-100 border-blue-300 text-blue-700 hover:text-blue-800"
+                          onClick={() => setRevisionEventModal({
+                            isOpen: true,
+                            eventType: 'submitted',
+                            estimatedReturnDate: '',
+                            notes: ''
+                          })}
+                        >
+                          <Send className="w-4 h-4 mr-2" />
+                          Submit to Client
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="bg-green-50 hover:bg-green-100 border-green-300 text-green-700 hover:text-green-800"
+                          onClick={() => setRevisionEventModal({
+                            isOpen: true,
+                            eventType: 'received',
+                            estimatedReturnDate: '',
+                            notes: ''
+                          })}
+                        >
+                          <Download className="w-4 h-4 mr-2" />
+                          Received Back
+                        </Button>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-2">
+                        Track when documents are submitted to client or received back to calculate turnaround times
+                      </p>
+                    </div>
+
                   </div>
 
                   {/* Auto-generated Equipment Details */}
@@ -3159,8 +3613,17 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
             </div>
           </div>
         ) : (
+          <>
+            <div className="p-4 border-b border-gray-200">
+              <VDCRSearchBar
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                resultCount={filteredVDCRData.length}
+                totalCount={vdcrData.length}
+              />
+            </div>
           <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
-            <table className="w-full min-w-[1800px]">
+            <table className="w-full min-w-[1950px]">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-gradient-to-r from-blue-600 via-blue-500 to-indigo-600 text-white shadow-lg">
                   <th className="px-3 sm:px-4 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold border-b border-blue-400/30 bg-blue-600/90 sticky left-0 z-20 min-w-[60px] backdrop-blur-sm">
@@ -3229,6 +3692,12 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                       <span>Remarks</span>
                     </div>
                   </th>
+                  <th className="px-3 sm:px-4 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold border-b border-blue-400/30 min-w-[180px]">
+                    <div className="flex items-center space-x-1 sm:space-x-2">
+                      <div className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-white rounded-full"></div>
+                      <span>Counter / Status</span>
+                    </div>
+                  </th>
                   <th className="px-3 sm:px-4 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold border-b border-blue-400/30 min-w-[200px]">
                     <div className="flex items-center space-x-1 sm:space-x-2">
                       <div className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-white rounded-full"></div>
@@ -3244,7 +3713,7 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                 </tr>
               </thead>
               <tbody>
-                {vdcrData.map((record, index) => (
+                {filteredVDCRData.map((record, index) => (
                   <tr
                     key={record.id}
                     className={`group hover:bg-gradient-to-r hover:from-blue-50/50 hover:to-indigo-50/50 transition-all duration-300 border-b border-gray-100 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'
@@ -3334,6 +3803,56 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                         </span>
                       </div>
                     </td>
+                    <td className="px-3 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm">
+                      {(() => {
+                        const metrics = getCounterMetrics(record);
+                        return (
+                          <div className="space-y-1">
+                            {metrics.daysSinceLastSubmission !== null && (
+                              <div className="flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-blue-500" />
+                                <span className="text-xs text-blue-700 font-medium">
+                                  {metrics.daysSinceLastSubmission}d since submission
+                                </span>
+                              </div>
+                            )}
+                            {metrics.daysWithClient !== null && (
+                              <div className="flex items-center gap-1">
+                                <Send className="w-3 h-3 text-purple-500" />
+                                <span className="text-xs text-purple-700 font-medium">
+                                  {metrics.daysWithClient}d with client
+                                </span>
+                              </div>
+                            )}
+                            <Badge 
+                              variant="outline" 
+                              className={`text-xs ${
+                                metrics.currentStatus === 'With Client' 
+                                  ? 'bg-yellow-50 text-yellow-700 border-yellow-300' 
+                                  : metrics.currentStatus === 'Received'
+                                  ? 'bg-green-50 text-green-700 border-green-300'
+                                  : 'bg-gray-50 text-gray-600 border-gray-300'
+                              }`}
+                            >
+                              {metrics.currentStatus}
+                            </Badge>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 px-2 text-xs mt-1"
+                              onClick={() => setRevisionHistoryModal({
+                                isOpen: true,
+                                vdcrRecordId: record.id,
+                                documentName: record.documentName
+                              })}
+                            >
+                              <History className="w-3 h-3 mr-1" />
+                              History
+                            </Button>
+                          </div>
+                        );
+                      })()}
+                    </td>
                     <td className="px-3 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm text-gray-600 whitespace-nowrap">
                       <div className="flex items-center space-x-2 sm:space-x-3">
                         <div className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-green-400 rounded-full animate-pulse"></div>
@@ -3371,14 +3890,15 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
                             <X size={10} className="sm:w-3 sm:h-3 mr-1" />
                             <span className="hidden sm:inline">Delete</span>
                           </Button>
-                        </div>
-                      )}
+                          </div>
+)}
                     </td>
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+              </table>
+            </div>
+          </>
         )}
       </Card>
 
@@ -3386,23 +3906,97 @@ const ProjectsVDCR = ({ projectId, projectName, onBack, onViewDetails, onViewEqu
         <div className="flex items-center justify-center space-x-8">
           <div className="flex items-center space-x-2">
             <div className="w-3 h-3 bg-blue-500 rounded-sm"></div>
-            <span className="text-sm text-gray-600">Code 1: Critical</span>
+            <span className="text-sm text-gray-600">Code 1</span>
           </div>
           <div className="flex items-center space-x-2">
             <div className="w-3 h-3 bg-green-500 rounded-sm"></div>
-            <span className="text-sm text-gray-600">Code 2: Important</span>
+            <span className="text-sm text-gray-600">Code 2</span>
           </div>
           <div className="flex items-center space-x-2">
             <div className="w-3 h-3 bg-yellow-500 rounded-sm"></div>
-            <span className="text-sm text-gray-600">Code 3: Standard</span>
+            <span className="text-sm text-gray-600">Code 3</span>
           </div>
           <div className="flex items-center space-x-2">
             <div className="w-3 h-3 bg-purple-500 rounded-sm"></div>
-            <span className="text-sm text-gray-600">Code 4: Reference</span>
+            <span className="text-sm text-gray-600">Code 4</span>
           </div>
         </div>
       </div>
+
+      {/* Revision History Modal */}
+      {revisionHistoryModal.vdcrRecordId && (() => {
+        const record = vdcrData.find(r => r.id === revisionHistoryModal.vdcrRecordId);
+        return (
+          <VDCRRevisionHistory
+            vdcrRecordId={revisionHistoryModal.vdcrRecordId}
+            documentName={revisionHistoryModal.documentName}
+            currentRevision={record?.revision}
+            projectId={projectId}
+            isOpen={revisionHistoryModal.isOpen}
+            onClose={() => setRevisionHistoryModal({ isOpen: false, vdcrRecordId: null, documentName: '' })}
+          />
+        );
+      })()}
+
+      {/* Revision Event Modal */}
+      <Dialog open={revisionEventModal.isOpen} onOpenChange={(open) => {
+        if (!open) {
+          setRevisionEventModal({ isOpen: false, eventType: null, estimatedReturnDate: '', notes: '' });
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {revisionEventModal.eventType === 'submitted' ? 'Submit to Client' : 'Received Back'}
+            </DialogTitle>
+            <DialogDescription>
+              Track this revision event to calculate turnaround times
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Revision Number</Label>
+              <Input value={formData.revision} disabled className="mt-1" />
+            </div>
+            {revisionEventModal.eventType === 'submitted' && (
+              <div>
+                <Label htmlFor="estimatedReturnDate">Estimated Return Date (Optional)</Label>
+                <Input
+                  id="estimatedReturnDate"
+                  type="date"
+                  value={revisionEventModal.estimatedReturnDate}
+                  onChange={(e) => setRevisionEventModal(prev => ({ ...prev, estimatedReturnDate: e.target.value }))}
+                  className="mt-1"
+                />
+              </div>
+            )}
+            <div>
+              <Label htmlFor="eventNotes">Notes (Optional)</Label>
+              <Textarea
+                id="eventNotes"
+                value={revisionEventModal.notes}
+                onChange={(e) => setRevisionEventModal(prev => ({ ...prev, notes: e.target.value }))}
+                className="mt-1"
+                rows={3}
+                placeholder="Add any notes about this event..."
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRevisionEventModal({ isOpen: false, eventType: null, estimatedReturnDate: '', notes: '' })}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleCreateRevisionEvent}>
+              {revisionEventModal.eventType === 'submitted' ? 'Submit' : 'Mark as Received'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
+
   );
 };
 

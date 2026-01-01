@@ -284,6 +284,51 @@ export class DatabaseService {
     return true
   }
 
+  // VDCR REVISION EVENTS OPERATIONS
+  static async createVDCRRevisionEvent(event: InsertTables<'vdcr_revision_events'>) {
+    const { data, error } = await supabase
+      .from('vdcr_revision_events')
+      .insert(event)
+      .select()
+      .single()
+    
+    if (error) throw error
+    return data
+  }
+
+  static async getVDCRRevisionEvents(vdcrRecordId: string) {
+    const { data, error } = await supabase
+      .from('vdcr_revision_events')
+      .select('*,created_by_user:created_by(full_name,email)')
+      .eq('vdcr_record_id', vdcrRecordId)
+      .order('event_date', { ascending: false })
+    
+    if (error) throw error
+    return data
+  }
+
+  static async updateVDCRRevisionEvent(eventId: string, updates: UpdateTables<'vdcr_revision_events'>) {
+    const { data, error } = await supabase
+      .from('vdcr_revision_events')
+      .update({ ...updates, updated_at: new Date().toISOString() })
+      .eq('id', eventId)
+      .select()
+      .single()
+    
+    if (error) throw error
+    return data
+  }
+
+  static async deleteVDCRRevisionEvent(eventId: string) {
+    const { error } = await supabase
+      .from('vdcr_revision_events')
+      .delete()
+      .eq('id', eventId)
+    
+    if (error) throw error
+    return true
+  }
+
   // PROGRESS ENTRIES OPERATIONS
   static async createProgressEntry(entry: InsertTables<'progress_entries'>) {
     const { data, error } = await supabase

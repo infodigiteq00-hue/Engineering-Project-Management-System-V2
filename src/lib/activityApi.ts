@@ -342,7 +342,12 @@ export const activityApi = {
   }) {
     try {
       console.log('📋 Fetching VDCR activity logs for project:', projectId);
-      let query = `/vdcr_activity_logs?project_id=eq.${projectId}`;
+      
+      // Build the select query first - this is critical for PostgREST
+      let selectQuery = `select=*,created_by_user:created_by(full_name,email),vdcr_record:vdcr_id(document_name,status)`;
+      
+      // Start with the base query and select
+      let query = `/vdcr_activity_logs?project_id=eq.${projectId}&${selectQuery}`;
       
       if (filters?.vdcrId) {
         query += `&vdcr_id=eq.${filters.vdcrId}`;
@@ -360,7 +365,9 @@ export const activityApi = {
         query += `&created_at=lte.${filters.dateTo}`;
       }
       
+      // Add ordering
       query += `&order=created_at.desc`;
+      
       if (filters?.limit) {
         query += `&limit=${filters.limit}`;
       }
@@ -368,12 +375,15 @@ export const activityApi = {
         query += `&offset=${filters.offset}`;
       }
       
-      query += `&select=*,created_by_user:created_by(full_name,email),vdcr_record:vdcr_id(document_name,status)`;
-      
       console.log('📋 Query:', query);
       const response = await api.get(query);
       console.log('✅ VDCR activity logs fetched successfully:', response.data?.length || 0, 'logs');
-      return response.data || [];
+      
+      // Ensure we return an array even if response.data is null/undefined
+      const logs = Array.isArray(response.data) ? response.data : [];
+      console.log('📋 Processed logs count:', logs.length);
+      
+      return logs;
     } catch (error: any) {
       console.error('❌ Error fetching VDCR activity logs:', error);
       console.error('❌ Error response:', error?.response?.data);
@@ -386,7 +396,21 @@ export const activityApi = {
         return [];
       }
       
-      throw error;
+      // For other errors, try a simpler query without foreign key relationships
+      console.warn('⚠️ Retrying with simplified query (without foreign key relationships)...');
+      try {
+        let simpleQuery = `/vdcr_activity_logs?project_id=eq.${projectId}&select=*&order=created_at.desc`;
+        if (filters?.limit) {
+          simpleQuery += `&limit=${filters.limit}`;
+        }
+        const simpleResponse = await api.get(simpleQuery);
+        const simpleLogs = Array.isArray(simpleResponse.data) ? simpleResponse.data : [];
+        console.log('✅ VDCR activity logs fetched with simplified query:', simpleLogs.length, 'logs');
+        return simpleLogs;
+      } catch (retryError) {
+        console.error('❌ Error with simplified query as well:', retryError);
+        return [];
+      }
     }
   }
 };

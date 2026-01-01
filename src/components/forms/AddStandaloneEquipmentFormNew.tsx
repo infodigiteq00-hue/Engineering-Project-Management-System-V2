@@ -166,11 +166,19 @@ const AddStandaloneEquipmentFormNew = ({ onClose, onSubmit }: AddStandaloneEquip
         const firmId = userData.firm_id;
         
         if (!firmId) {
+          console.warn('⚠️ No firm_id found, cannot fetch suggestions');
           return;
         }
 
         // Fetch standalone equipment from Supabase
         const existingEquipment = await fastAPI.getStandaloneEquipment();
+        
+        console.log('📋 Fetched existing equipment:', {
+          exists: !!existingEquipment,
+          isArray: Array.isArray(existingEquipment),
+          length: existingEquipment?.length || 0,
+          sample: existingEquipment?.[0]
+        });
         
         if (existingEquipment && Array.isArray(existingEquipment) && existingEquipment.length > 0) {
           
@@ -183,75 +191,213 @@ const AddStandaloneEquipmentFormNew = ({ onClose, onSubmit }: AddStandaloneEquip
           
           // Extract equipment managers from equipment_manager field in standalone_equipment table
           const uniqueEquipmentManagersFromEquipment = [...new Set(existingEquipment.map((eq: any) => eq.equipment_manager).filter(Boolean))];
+          console.log('📋 Equipment managers from equipment_manager field:', {
+            count: uniqueEquipmentManagersFromEquipment.length,
+            managers: uniqueEquipmentManagersFromEquipment,
+            sampleEquipment: existingEquipment.slice(0, 3).map((eq: any) => ({ id: eq.id, equipment_manager: eq.equipment_manager }))
+          });
           
           // Standard industry options (always available)
           const standardIndustries = ['Petrochemical', 'Steel', 'Refinery', 'Marine', 'Power', 'Pharmaceutical', 'Chemical', 'Oil & Gas'];
           
-          // Update dynamic options with existing data (excluding equipmentManager for now, will add after fetching from team_positions)
+          // Update dynamic options with existing data
+          // Set equipmentManager immediately with data from equipment_manager field
           setDynamicOptions(prev => ({
             ...prev,
             clientName: uniqueClients,
             plantLocation: uniqueLocations,
             clientIndustry: [...new Set([...standardIndustries, ...uniqueIndustries])],
             consultant: uniqueConsultants,
-            tpiAgency: uniqueTpiAgencies
+            tpiAgency: uniqueTpiAgencies,
+            equipmentManager: uniqueEquipmentManagersFromEquipment // Set immediately with what we have
           }));
           
-          // Fetch equipment managers from standalone_equipment_team_positions
+          console.log('✅ Set initial equipmentManager options from equipment_manager field:', uniqueEquipmentManagersFromEquipment.length);
+          
+          // Fetch equipment managers from multiple sources (will update state with combined results)
+          console.log('🔍 Starting to fetch equipment managers from multiple sources...');
           try {
             const { createClient } = await import('@supabase/supabase-js');
             const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
             const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
             const supabase = createClient(supabaseUrl, supabaseKey);
+            console.log('✅ Supabase client created');
             
-            // Fetch team positions where position_name is 'Equipment Manager'
-            const { data: teamPositions, error } = await supabase
-              .from('standalone_equipment_team_positions')
-              .select('person_name, email, phone')
-              .eq('position_name', 'Equipment Manager');
-            
-            if (error) {
-              console.error('❌ Error fetching equipment managers:', error);
+            // Source 1: Fetch team positions where position_name is 'Equipment Manager'
+            let equipmentManagersFromTeamPositions: string[] = [];
+            try {
+              console.log('🔍 Querying standalone_equipment_team_positions for Equipment Managers...');
+              
+              // Use REST API directly instead of Supabase client to avoid potential issues
+              const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+              const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+              
+              const teamPositionsResponse = await fetch(
+                `${SUPABASE_URL}/rest/v1/standalone_equipment_team_positions?position_name=eq.Equipment Manager&select=person_name,email,phone`,
+                {
+                  method: 'GET',
+                  headers: {
+                    'apikey': SUPABASE_ANON_KEY,
+                    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation'
+                  }
+                }
+              );
+              
+              if (!teamPositionsResponse.ok) {
+                const errorText = await teamPositionsResponse.text();
+                console.error('❌ Error fetching equipment managers from team_positions:', teamPositionsResponse.status, errorText);
+              } else {
+                const teamPositions = await teamPositionsResponse.json();
+                console.log('📋 Team positions query result:', {
+                  dataLength: teamPositions?.length || 0,
+                  data: teamPositions
+                });
+                
+                equipmentManagersFromTeamPositions = teamPositions && Array.isArray(teamPositions) && teamPositions.length > 0 
+                  ? [...new Set(teamPositions.map((tp: any) => tp.person_name).filter(Boolean))]
+                  : [];
+                console.log('✅ Found equipment managers from team_positions:', equipmentManagersFromTeamPositions.length, equipmentManagersFromTeamPositions);
+              }
+            } catch (teamPosError) {
+              console.error('❌ Error in team_positions query:', teamPosError);
             }
             
-            // Combine equipment managers from both sources:
-            // 1. From equipment_manager field in standalone_equipment table
-            // 2. From standalone_equipment_team_positions table
-            const equipmentManagersFromTeamPositions = teamPositions && teamPositions.length > 0 
-              ? [...new Set(teamPositions.map((tp: any) => tp.person_name).filter(Boolean))]
-              : [];
+            // Source 2: Fetch project managers from users table (users with role 'project_manager' in the same firm)
+            let equipmentManagersFromUsers: string[] = [];
+            try {
+              console.log('🔍 Querying users table for project managers, firm_id:', firmId);
+              
+              // Use REST API directly instead of Supabase client
+              const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+              const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+              
+              const usersResponse = await fetch(
+                `${SUPABASE_URL}/rest/v1/users?firm_id=eq.${firmId}&role=eq.project_manager&is_active=eq.true&select=full_name,email,phone`,
+                {
+                  method: 'GET',
+                  headers: {
+                    'apikey': SUPABASE_ANON_KEY,
+                    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation'
+                  }
+                }
+              );
+              
+              if (!usersResponse.ok) {
+                const errorText = await usersResponse.text();
+                console.error('❌ Error fetching project managers from users:', usersResponse.status, errorText);
+              } else {
+                const projectManagersData = await usersResponse.json();
+                console.log('📋 Users query result:', {
+                  dataLength: projectManagersData?.length || 0,
+                  data: projectManagersData
+                });
+                
+                equipmentManagersFromUsers = projectManagersData && Array.isArray(projectManagersData) && projectManagersData.length > 0
+                  ? [...new Set(projectManagersData.map((user: any) => user.full_name).filter(Boolean))]
+                  : [];
+                console.log('✅ Found project managers from users:', equipmentManagersFromUsers.length, equipmentManagersFromUsers);
+                
+                // Also store these as projectManagers for contact details
+                const managersList: Array<{ name: string; email: string; phone: string }> = [];
+                if (projectManagersData && Array.isArray(projectManagersData)) {
+                  projectManagersData.forEach((user: any) => {
+                    if (user.full_name) {
+                      managersList.push({
+                        name: user.full_name,
+                        email: user.email || '',
+                        phone: user.phone || ''
+                      });
+                    }
+                  });
+                }
+                setProjectManagers(managersList);
+              }
+            } catch (usersError) {
+              console.error('❌ Error in users query:', usersError);
+            }
             
-            // Combine both sources and remove duplicates
-            const allEquipmentManagers = [...new Set([...uniqueEquipmentManagersFromEquipment, ...equipmentManagersFromTeamPositions])];
+            // Combine all sources: equipment_manager field, team_positions, and users table
+            const allEquipmentManagers = [...new Set([
+              ...uniqueEquipmentManagersFromEquipment,
+              ...equipmentManagersFromTeamPositions,
+              ...equipmentManagersFromUsers
+            ])];
+            
+            console.log('📊 Total unique equipment managers found:', allEquipmentManagers.length);
+            console.log('📊 Equipment managers list:', allEquipmentManagers);
+            console.log('📊 Sources breakdown:', {
+              fromEquipment: uniqueEquipmentManagersFromEquipment.length,
+              fromTeamPositions: equipmentManagersFromTeamPositions.length,
+              fromUsers: equipmentManagersFromUsers.length,
+              total: allEquipmentManagers.length
+            });
             
             // Update dynamic options with combined equipment managers
-            setDynamicOptions(prev => ({
-              ...prev,
-              equipmentManager: allEquipmentManagers
-            }));
+            setDynamicOptions(prev => {
+              const updated = {
+                ...prev,
+                equipmentManager: allEquipmentManagers
+              };
+              console.log('📊 Setting dynamicOptions.equipmentManager:', allEquipmentManagers);
+              console.log('📊 Updated dynamicOptions state:', updated);
+              return updated;
+            });
             
             // Store contact details for equipment managers from team_positions
             const managerContacts: Record<string, { email: string; phone: string }> = {};
-            const managersList: Array<{ name: string; email: string; phone: string }> = [];
             
-            if (teamPositions && teamPositions.length > 0) {
-              teamPositions.forEach((tp: any) => {
-                if (tp.person_name && tp.email) {
-                  managerContacts[tp.person_name] = {
-                    email: tp.email || '',
-                    phone: tp.phone || ''
-                  };
-                  managersList.push({
-                    name: tp.person_name,
-                    email: tp.email || '',
-                    phone: tp.phone || ''
-                  });
-                }
-              });
+            // Add contacts from team_positions
+            try {
+              const { data: teamPositions } = await supabase
+                .from('standalone_equipment_team_positions')
+                .select('person_name, email, phone')
+                .eq('position_name', 'Equipment Manager');
+              
+              if (teamPositions && teamPositions.length > 0) {
+                teamPositions.forEach((tp: any) => {
+                  if (tp.person_name && tp.email) {
+                    managerContacts[tp.person_name] = {
+                      email: tp.email || '',
+                      phone: tp.phone || ''
+                    };
+                  }
+                });
+              }
+            } catch (contactError) {
+              console.error('❌ Error fetching contact details:', contactError);
+            }
+            
+            // Add contacts from users table (project managers)
+            try {
+              const { data: projectManagersData } = await supabase
+                .from('users')
+                .select('full_name, email, phone')
+                .eq('firm_id', firmId)
+                .eq('role', 'project_manager')
+                .eq('is_active', true);
+              
+              if (projectManagersData && projectManagersData.length > 0) {
+                projectManagersData.forEach((user: any) => {
+                  if (user.full_name) {
+                    // Only add if not already present (team_positions takes priority)
+                    if (!managerContacts[user.full_name]) {
+                      managerContacts[user.full_name] = {
+                        email: user.email || '',
+                        phone: user.phone || ''
+                      };
+                    }
+                  }
+                });
+              }
+            } catch (contactError) {
+              console.error('❌ Error fetching user contact details:', contactError);
             }
             
             setEquipmentManagerContacts(managerContacts);
-            setProjectManagers(managersList);
           } catch (error) {
             console.error('❌ Error fetching equipment managers:', error);
             // Even if team_positions fetch fails, still use equipment_manager field values
@@ -259,6 +405,77 @@ const AddStandaloneEquipmentFormNew = ({ onClose, onSubmit }: AddStandaloneEquip
               ...prev,
               equipmentManager: uniqueEquipmentManagersFromEquipment
             }));
+          }
+        } else {
+          console.log('📋 No existing equipment found, fetching project managers from users table');
+          // No existing equipment, but still try to fetch project managers from users table
+          try {
+            if (firmId) {
+              const { createClient } = await import('@supabase/supabase-js');
+              const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+              const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+              const supabase = createClient(supabaseUrl, supabaseKey);
+              
+              console.log('📋 Fetching project managers for firm_id:', firmId);
+              const { data: projectManagersData, error: usersError } = await supabase
+                .from('users')
+                .select('full_name, email, phone')
+                .eq('firm_id', firmId)
+                .eq('role', 'project_manager')
+                .eq('is_active', true);
+              
+              console.log('📋 Project managers query result:', {
+                error: usersError,
+                data: projectManagersData,
+                count: projectManagersData?.length || 0
+              });
+              
+              if (!usersError && projectManagersData && projectManagersData.length > 0) {
+                const equipmentManagersFromUsers = [...new Set(projectManagersData.map((user: any) => user.full_name).filter(Boolean))];
+                
+                console.log('📊 Setting equipment managers from users (no equipment case):', equipmentManagersFromUsers);
+                
+                setDynamicOptions(prev => {
+                  const updated = {
+                    ...prev,
+                    equipmentManager: equipmentManagersFromUsers
+                  };
+                  console.log('📊 Updated dynamicOptions (no equipment case):', updated);
+                  return updated;
+                });
+                
+                const managersList: Array<{ name: string; email: string; phone: string }> = [];
+                const managerContacts: Record<string, { email: string; phone: string }> = {};
+                
+                projectManagersData.forEach((user: any) => {
+                  if (user.full_name) {
+                    managersList.push({
+                      name: user.full_name,
+                      email: user.email || '',
+                      phone: user.phone || ''
+                    });
+                    managerContacts[user.full_name] = {
+                      email: user.email || '',
+                      phone: user.phone || ''
+                    };
+                  }
+                });
+                
+                setProjectManagers(managersList);
+                setEquipmentManagerContacts(managerContacts);
+              } else {
+                console.warn('⚠️ No project managers found in users table');
+                // Even if no project managers found, ensure equipmentManager is at least an empty array
+                setDynamicOptions(prev => ({
+                  ...prev,
+                  equipmentManager: prev.equipmentManager || []
+                }));
+              }
+            } else {
+              console.warn('⚠️ No firm_id available to fetch project managers');
+            }
+          } catch (error) {
+            console.error('❌ Error fetching project managers when no equipment exists:', error);
           }
         }
       } catch (error) {
@@ -268,6 +485,12 @@ const AddStandaloneEquipmentFormNew = ({ onClose, onSubmit }: AddStandaloneEquip
 
     fetchExistingStandaloneEquipment();
   }, []);
+
+  // Debug: Monitor dynamicOptions changes
+  useEffect(() => {
+    console.log('🔍 dynamicOptions state changed:', dynamicOptions);
+    console.log('🔍 equipmentManager options:', dynamicOptions.equipmentManager);
+  }, [dynamicOptions]);
 
   const handleInputChange = (field: keyof StandaloneEquipmentFormData, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -453,6 +676,19 @@ const AddStandaloneEquipmentFormNew = ({ onClose, onSubmit }: AddStandaloneEquip
     const filteredOptions = options.filter(option => 
       option.toLowerCase().includes(searchQuery.toLowerCase())
     );
+
+    // Debug logging for Equipment Manager field
+    if (field === 'equipmentManager') {
+      console.log('🔧 Equipment Manager Field Render:', {
+        field,
+        options,
+        optionsLength: options.length,
+        filteredOptions,
+        filteredLength: filteredOptions.length,
+        dynamicOptions: dynamicOptions[field],
+        allDynamicOptions: dynamicOptions
+      });
+    }
 
     return (
       <div className="space-y-1.5 sm:space-y-2">

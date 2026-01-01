@@ -1706,7 +1706,36 @@ export const fastAPI = {
       const response = await api.get(`/equipment_documents?equipment_id=eq.${equipmentId}&select=*&order=upload_date.desc`);
       // console.log('✅ Documents fetch API response:', response.data);
       // console.log(`📊 Found ${(response.data as any[])?.length || 0} documents for equipment ${equipmentId}`);
-      return response.data;
+      
+      let documents = Array.isArray(response.data) ? response.data : [];
+      
+      // Fetch user data for uploaded_by fields
+      const userIds = [...new Set(documents
+        .map((doc: any) => doc.uploaded_by)
+        .filter((id: any) => id && typeof id === 'string' && id.length === 36) // UUID check
+      )];
+      
+      let usersMap: Record<string, any> = {};
+      if (userIds.length > 0) {
+        try {
+          const usersResponse = await api.get(`/users?id=in.(${userIds.join(',')})&select=id,full_name,email`);
+          const users = Array.isArray(usersResponse.data) ? usersResponse.data : [];
+          usersMap = users.reduce((acc: any, user: any) => {
+            acc[user.id] = { full_name: user.full_name, email: user.email };
+            return acc;
+          }, {});
+        } catch (userError) {
+          console.warn('⚠️ Could not fetch user data for equipment documents:', userError);
+        }
+      }
+      
+      // Merge user data into documents
+      documents = documents.map((doc: any) => ({
+        ...doc,
+        uploaded_by_user: doc.uploaded_by ? usersMap[doc.uploaded_by] : null
+      }));
+      
+      return documents;
     } catch (error: any) {
       console.error('❌ Error fetching documents:', error);
       console.error('❌ Error details:', error.response?.data || error.message);
@@ -3097,6 +3126,61 @@ export const fastAPI = {
     }
   },
 
+  // =====================================================
+  // VDCR REVISION EVENTS API FUNCTIONS
+  // =====================================================
+
+  // Create VDCR revision event
+  async createVDCRRevisionEvent(eventData: any) {
+    try {
+      const response = await api.post('/vdcr_revision_events', eventData);
+      return response.data;
+    } catch (error: any) {
+      // Only log if it's not a 404 (table doesn't exist yet)
+      if (error?.response?.status !== 404) {
+        console.error('❌ Error creating VDCR revision event:', error);
+      }
+      throw error;
+    }
+  },
+
+  // Get VDCR revision events by record ID
+  async getVDCRRevisionEvents(vdcrRecordId: string) {
+    try {
+      const response = await api.get(`/vdcr_revision_events?vdcr_record_id=eq.${vdcrRecordId}&select=*,created_by_user:created_by(full_name,email)&order=event_date.desc`);
+      return response.data;
+    } catch (error: any) {
+      // Only log if it's not a 404 (table doesn't exist yet)
+      if (error?.response?.status !== 404) {
+        console.error('❌ Error fetching VDCR revision events:', error);
+      }
+      return [];
+    }
+  },
+
+  // Update VDCR revision event
+  async updateVDCRRevisionEvent(eventId: string, updateData: any) {
+    try {
+      const response = await api.patch(`/vdcr_revision_events?id=eq.${eventId}`, updateData);
+      return response.data;
+    } catch (error: any) {
+      console.error('❌ Error updating VDCR revision event:', error);
+      throw error;
+    }
+  },
+
+  // Delete VDCR revision event
+  async deleteVDCRRevisionEvent(eventId: string) {
+    try {
+      await api.delete(`/vdcr_revision_events?id=eq.${eventId}`);
+      return true;
+    } catch (error: any) {
+      console.error('❌ Error deleting VDCR revision event:', error);
+      throw error;
+    }
+  },
+
+
   // Delete VDCR document
   async deleteVDCRDocument(documentId: string) {
     try {
@@ -3842,6 +3926,7 @@ export const getEquipmentDocuments = async (equipmentId: string) => {
   try {
     // console.log('📄 Fetching documents for equipment:', equipmentId);
     
+    // Fetch documents first
     const response = await axios.get(`${SUPABASE_URL}/rest/v1/equipment_documents`, {
       params: {
         equipment_id: `eq.${equipmentId}`,
@@ -3854,10 +3939,46 @@ export const getEquipmentDocuments = async (equipmentId: string) => {
       }
     });
 
-    // console.log('📄 Equipment documents fetched:', response.data);
-    // console.log('📄 Response status:', response.status);
-    // console.log('📄 Number of documents found:', Array.isArray(response.data) ? response.data.length : 0);
-    return response.data;
+    let documents = Array.isArray(response.data) ? response.data : [];
+    
+    // Fetch user data for uploaded_by fields
+    const userIds = [...new Set(documents
+      .map((doc: any) => doc.uploaded_by)
+      .filter((id: any) => id && typeof id === 'string' && id.length === 36) // UUID check
+    )];
+    
+    let usersMap: Record<string, any> = {};
+    if (userIds.length > 0) {
+      try {
+        const usersResponse = await axios.get(`${SUPABASE_URL}/rest/v1/users`, {
+          params: {
+            id: `in.(${userIds.join(',')})`,
+            select: 'id,full_name,email'
+          },
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+          }
+        });
+        
+        const users = Array.isArray(usersResponse.data) ? usersResponse.data : [];
+        usersMap = users.reduce((acc: any, user: any) => {
+          acc[user.id] = { full_name: user.full_name, email: user.email };
+          return acc;
+        }, {});
+      } catch (userError) {
+        console.warn('⚠️ Could not fetch user data for equipment documents:', userError);
+      }
+    }
+    
+    // Merge user data into documents
+    documents = documents.map((doc: any) => ({
+      ...doc,
+      uploaded_by_user: doc.uploaded_by ? usersMap[doc.uploaded_by] : null
+    }));
+
+    // console.log('📄 Equipment documents fetched:', documents);
+    return documents;
   } catch (error: any) {
     console.error('❌ Error fetching equipment documents:', error);
     console.error('❌ Error response:', error.response?.data);
@@ -3933,10 +4054,11 @@ export const getStandaloneEquipmentDocuments = async (equipmentId: string) => {
   try {
     // console.log('📄 Fetching standalone equipment documents for equipment:', equipmentId);
     
+    // Fetch documents with user information via foreign key join (standalone references public.users)
     const response = await axios.get(`${SUPABASE_URL}/rest/v1/standalone_equipment_documents`, {
       params: {
         equipment_id: `eq.${equipmentId}`,
-        select: '*',
+        select: '*,uploaded_by_user:uploaded_by(full_name,email)',
         order: 'created_at.desc'
       },
       headers: {
@@ -3945,8 +4067,54 @@ export const getStandaloneEquipmentDocuments = async (equipmentId: string) => {
       }
     });
 
-    // console.log('📄 Standalone equipment documents fetched:', response.data);
-    return response.data;
+    let documents = Array.isArray(response.data) ? response.data : [];
+    
+    // If foreign key join didn't work, fetch user data separately
+    const needsUserFetch = documents.some((doc: any) => 
+      doc.uploaded_by && 
+      !doc.uploaded_by_user && 
+      typeof doc.uploaded_by === 'string' && 
+      doc.uploaded_by.length === 36
+    );
+    
+    if (needsUserFetch) {
+      const userIds = [...new Set(documents
+        .map((doc: any) => doc.uploaded_by)
+        .filter((id: any) => id && typeof id === 'string' && id.length === 36)
+      )];
+      
+      if (userIds.length > 0) {
+        try {
+          const usersResponse = await axios.get(`${SUPABASE_URL}/rest/v1/users`, {
+            params: {
+              id: `in.(${userIds.join(',')})`,
+              select: 'id,full_name,email'
+            },
+            headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+            }
+          });
+          
+          const users = Array.isArray(usersResponse.data) ? usersResponse.data : [];
+          const usersMap = users.reduce((acc: any, user: any) => {
+            acc[user.id] = { full_name: user.full_name, email: user.email };
+            return acc;
+          }, {});
+          
+          // Merge user data into documents
+          documents = documents.map((doc: any) => ({
+            ...doc,
+            uploaded_by_user: doc.uploaded_by_user || (doc.uploaded_by ? usersMap[doc.uploaded_by] : null)
+          }));
+        } catch (userError) {
+          console.warn('⚠️ Could not fetch user data for standalone equipment documents:', userError);
+        }
+      }
+    }
+
+    // console.log('📄 Standalone equipment documents fetched:', documents);
+    return documents;
   } catch (error: any) {
     console.error('❌ Error fetching standalone equipment documents:', error);
     console.error('❌ Error response:', error.response?.data);

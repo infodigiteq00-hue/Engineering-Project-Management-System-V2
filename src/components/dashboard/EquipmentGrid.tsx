@@ -761,7 +761,20 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
           const docs = projectId === 'standalone'
             ? await getStandaloneEquipmentDocuments(eq.id)
             : await fastAPI.getDocumentsByEquipment(eq.id);
-          documentsMap[eq.id] = Array.isArray(docs) ? docs : [];
+          
+          // Transform documents to include user names
+          const transformedDocs = Array.isArray(docs) ? docs.map((doc: any) => ({
+            ...doc,
+            id: doc.id,
+            name: doc.document_name || doc.name,
+            document_name: doc.document_name || doc.name,
+            document_url: doc.document_url || doc.url,
+            uploadedBy: doc.uploaded_by_user?.full_name || doc.uploaded_by || 'Unknown',
+            uploadDate: doc.upload_date || doc.created_at,
+            document_type: doc.document_type || 'Equipment Document'
+          })) : [];
+          
+          documentsMap[eq.id] = transformedDocs;
         } catch (error) {
           devError(`❌ Error loading documents for equipment ${eq.id}:`, error);
           documentsMap[eq.id] = [];
@@ -1621,7 +1634,7 @@ const EquipmentGrid = ({ equipment, projectName, projectId, onBack, onViewDetail
           name: doc.document_name,
           document_name: doc.document_name,
           document_url: doc.document_url,
-          uploadedBy: doc.uploaded_by || 'Unknown',
+          uploadedBy: doc.uploaded_by_user?.full_name || doc.uploaded_by || 'Unknown',
           uploadDate: doc.upload_date || doc.created_at,
           document_type: doc.document_type || 'Equipment Document'
         })) : [];
